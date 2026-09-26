@@ -1,21 +1,48 @@
 #!/usr/bin/env python3
-"""Copy Claude Code sessions between .claude dirs, local or over ssh (rsync).
+"""Copy Claude Code sessions between users or machines (rsync over ssh).
 
-  cc-session                                  interactive (arrow keys)
-  cc-session [-i KEY.pem] ...                 key for remote hosts (or set CC_SESSION_SSH_OPTS)
-  cc-session ID FROM TO [-p PROJ] [-P DEST_PROJ] [-n]
+  cc-session                                   interactive: pick machines, project and sessions
+  cc-session remote add NAME user@host [-i KEY.pem] [--port N]
+  cc-session remote list | rm NAME
   cc-session list LOCATION [-p PROJ]
+  cc-session ID FROM TO [-p PROJ] [-P DEST_PROJ] [-n]
 
-LOCATION is a Claude config dir: /home/me/.claude or host:/root/.claude
-(a relative remote path such as host:.claude is relative to that user's home).
+LOCATION is a Claude config dir: /home/me/.claude, or REMOTE:/root/.claude where REMOTE is a
+saved remote name, an ssh config host, or user@host. -i KEY.pem applies to unsaved hosts.
 """
-import argparse, curses, glob, os, re, shlex, shutil, subprocess, sys, tempfile
+import argparse, curses, glob, json, os, re, shlex, shutil, subprocess, sys, tempfile
 
 SSH_OPTS = shlex.split(os.environ.get("CC_SESSION_SSH_OPTS", ""))
+HOSTS_FILE = os.path.expanduser("~/.config/cc-session/hosts.json")
+LOCAL, ADD = "@local", "@add"
 
+# Runs on the machine that holds the sessions (locally or through ssh).
 REMOTE = r'''
-import json, os, sys, time
-mode, root = sys.argv[1], os.path.join(os.path.expanduser(sys.argv[2]), "projects")
+import glob, json, os, sys, time
+mode = sys.argv[1]
+def readable(c):
+    return os.access(os.path.join(c, "projects"), os.R_OK)
+if mode == "dirs":
+    cands = [os.path.expanduser("~/.claude"), "/root/.claude"] + [
+        h + "/.claude" for h in sorted(glob.glob("/home/*") + glob.glob("/Users/*"))]
+    seen = set()
+    for c in cands:
+        if c not in seen and readable(c):
+            print(c)
+        seen.add(c)
+    sys.exit()
+if mode == "scan":
+    skip = {"/proc", "/sys", "/dev", "/run", "/snap", "/usr", "/lib", "/lib64", "/bin", "/sbin", "/boot", "/mnt"}
+    for root, dirs, _ in os.walk("/"):
+        if root in skip or root.count("/") > 6:
+            dirs[:] = []
+            continue
+        if os.path.basename(root) == ".claude" and readable(root):
+            print(root)
+            dirs[:] = []
+        dirs[:] = [d for d in dirs if d not in ("node_modules", ".git")]
+    sys.exit()
+root = os.path.join(os.path.expanduser(sys.argv[2]), "projects")
 if mode == "projects":
     for p in sorted(os.listdir(root)) if os.path.isdir(root) else []:
         d = os.path.join(root, p)
@@ -57,59 +84,107 @@ class Fail(Exception):
     pass
 
 
-def split(loc):
+# ---------- remotes ----------
+
+def load_hosts():
+    try:
+        return json.load(open(HOSTS_FILE))
+    except Exception:
+        return {}
+
+
+def save_hosts(hosts):
+    os.makedirs(os.path.dirname(HOSTS_FILE), exist_ok=True)
+    with open(HOSTS_FILE, "w") as f:
+        json.dump(hosts, f, indent=1)
+    os.chmod(HOSTS_FILE, 0o600)
+
+
+def resolve(machine):
+    """machine name -> (ssh target or None, ssh options)."""
+    if machine in (None, "", LOCAL):
+        return None, []
+    h = load_hosts().get(machine)
+    if not h:
+        return machine, list(SSH_OPTS)
+    # A remote the user added on purpose: trust its host key on first contact.
+    opts = ["-o", "StrictHostKeyChecking=accept-new"]
+    if h.get("key"):
+        opts += ["-i", h["key"], "-o", "IdentitiesOnly=yes"]
+    if h.get("port"):
+        opts += ["-p", str(h["port"])]
+    return h["target"], opts
+
+
+def parse(loc):
+    """'/path' or 'machine:/path' -> (ssh target or None, path, ssh options)."""
     m = re.match(r"^([^/:]+):(.*)$", loc)
-    return (m.group(1), m.group(2) or ".claude") if m else (None, loc)
+    if not m:
+        return None, loc.rstrip("/") or "/", []
+    target, opts = resolve(m.group(1))
+    return target, m.group(2).rstrip("/") or ".claude", opts
 
 
-def norm(loc):
-    return loc.rstrip("/") or "/"
-
-
-def query(loc, *args):
-    host, path = split(loc)
-    if host:
-        cmd = ["ssh", *SSH_OPTS, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "python3", "-", args[0], path, *args[1:]]
+def run_on(machine, *args):
+    target, opts = resolve(machine)
+    if target:
+        cmd = ["ssh", *opts, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", target, "python3", "-", *args]
         r = subprocess.run(cmd, input=REMOTE, capture_output=True, text=True)
     else:
-        r = subprocess.run(["python3", "-c", REMOTE, args[0], path, *args[1:]], capture_output=True, text=True)
+        r = subprocess.run(["python3", "-c", REMOTE, *args], capture_output=True, text=True)
     if r.returncode:
-        raise Fail("%s: %s" % (loc, r.stderr.strip() or "failed (needs python3 and key-based ssh)"))
+        raise Fail("%s: %s" % (machine or "this machine", r.stderr.strip() or "failed (needs python3 and key-based ssh)"))
     return [l.split("\t") for l in r.stdout.splitlines() if l]
+
+
+def query(loc, mode, *args):
+    m = re.match(r"^([^/:]+):(.*)$", loc)
+    machine, path = (m.group(1), m.group(2) or ".claude") if m else (None, loc)
+    return run_on(machine, mode, path, *args)
+
+
+def loc_of(machine, path):
+    return path if machine in (None, "", LOCAL) else "%s:%s" % (machine, path)
 
 
 def guess_project():
     return re.sub(r"[^A-Za-z0-9]", "-", os.getcwd())
 
 
-def run_rsync(args):
-    if subprocess.run(["rsync", "-a", "--mkpath", "-e", shlex.join(["ssh", *SSH_OPTS])] + args).returncode:
+# ---------- copying ----------
+
+def run_rsync(opts, args):
+    if subprocess.run(["rsync", "-a", "--mkpath", "-e", shlex.join(["ssh", *opts])] + args).returncode:
         raise Fail("rsync failed")
 
 
-def owner_args(dst):
+def owner_args(path):
     # Running as root into another user's ~/.claude would leave root-owned 0600 files they cannot read.
-    if split(dst)[0] or os.geteuid() != 0 or not os.path.isdir(dst):
+    if os.geteuid() != 0 or not os.path.isdir(path):
         return []
-    st = os.stat(dst)
+    st = os.stat(path)
     return ["--chown=%d:%d" % (st.st_uid, st.st_gid)] if st.st_uid else []
 
 
 def copy_one(sid, src, dst, proj, dproj, dry=False):
     if not re.fullmatch(r"[0-9a-f-]{36}", sid):
         raise Fail("not a session id: " + sid)
-    frm = "%s/projects/%s" % (norm(src), proj)
-    to = "%s/projects/%s" % (norm(dst), dproj)
-    n = (["-n"] if dry else []) + owner_args(norm(dst))
+    st, sp, so = parse(src)
+    dt, dp, do = parse(dst)
+    frm, to = "%s/projects/%s" % (sp, proj), "%s/projects/%s" % (dp, dproj)
+    S = lambda name: "%s%s/%s" % (st + ":" if st else "", frm, name)
+    D = "%s%s/" % (dt + ":" if dt else "", to)
+    extra = (["-n"] if dry else []) + ([] if dt else owner_args(dp))
     tmp = None
     try:
-        if split(src)[0] and split(dst)[0]:  # rsync cannot copy remote to remote; go through this machine
+        if st and dt:  # rsync cannot copy remote to remote; go through this machine
             tmp = tempfile.mkdtemp()
-            run_rsync(["%s/%s.jsonl" % (frm, sid), tmp + "/"])
-            run_rsync(["--ignore-missing-args", "%s/%s" % (frm, sid), tmp + "/"])
-            frm = tmp
-        run_rsync(["--partial"] + n + ["%s/%s.jsonl" % (frm, sid), to + "/"])
-        run_rsync(["--ignore-missing-args"] + n + ["%s/%s" % (frm, sid), to + "/"])
+            run_rsync(so, [S(sid + ".jsonl"), tmp + "/"])
+            run_rsync(so, ["--ignore-missing-args", S(sid), tmp + "/"])
+            S = lambda name: "%s/%s" % (tmp, name)
+        opts = do if dt else so
+        run_rsync(opts, ["--partial"] + extra + [S(sid + ".jsonl"), D])
+        run_rsync(opts, ["--ignore-missing-args"] + extra + [S(sid), D])
     finally:
         if tmp:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -196,26 +271,89 @@ def notice(scr, text, wait=True):
         scr.getch()
 
 
-def known_locations():
-    home = os.path.expanduser("~/.claude")
-    locs = [("This machine  (%s)" % home, home)]
-    for p in sorted(glob.glob("/home/*/.claude")):
-        if p != home and os.access(os.path.join(p, "projects"), os.R_OK):
-            locs.append(("Local user %s  (%s)" % (p.split("/")[2], p), p))
+def ssh_keys():
+    out = []
+    for p in sorted(glob.glob(os.path.expanduser("~/.ssh/*")) + glob.glob(os.path.expanduser("~/*.pem")) + glob.glob(os.path.expanduser("~/Downloads/*.pem"))):
+        try:
+            if os.path.isfile(p) and "PRIVATE KEY" in open(p, errors="ignore").read(200):
+                out.append(p)
+        except OSError:
+            pass
+    return out
+
+
+def add_remote(scr):
+    """Asks for login + key, saves the remote and checks it. Returns its name, or None."""
+    login = prompt(scr, "Add remote\nLogin, e.g. root@1.2.3.4 (or user@host:2222)")
+    if not login:
+        return None
+    m = re.match(r"^(.*?)(?::(\d+))?$", login)
+    target, port = m.group(1), m.group(2)
+    items = [(k, k) for k in ssh_keys()] + [("No key file  (ssh agent / default keys)", ""), ("Other…  (type a path)", "@other")]
+    key = menu(scr, "SSH key for %s" % login, items)
+    if key is None:
+        return None
+    if key == "@other":
+        key = prompt(scr, "Path to the private key (.pem)")
+        if key is None:
+            return None
+        key = os.path.expanduser(key)
+    name = prompt(scr, "Name for this remote", target.split("@")[-1])
+    if not name or re.search(r"[/:\s]", name):
+        return None
+    hosts = load_hosts()
+    hosts[name] = {"target": target, **({"key": key} if key else {}), **({"port": int(port)} if port else {})}
+    save_hosts(hosts)
+    notice(scr, "Connecting to %s …" % target, wait=False)
+    try:
+        run_on(name, "dirs")
+    except Fail:
+        hosts.pop(name)
+        save_hosts(hosts)
+        raise
+    return name
+
+
+def pick_machine(scr, title):
+    items = [("This machine", LOCAL)]
+    saved = load_hosts()
+    items += [("%s  (%s)" % (n, h["target"]), n) for n, h in saved.items()]
     cfg = os.path.expanduser("~/.ssh/config")
     if os.path.exists(cfg):
         for m in re.finditer(r"(?im)^\s*host\s+(.+)$", open(cfg).read()):
             for h in m.group(1).split():
-                if not re.search(r"[*?!]", h) and h != "github.com":
-                    locs.append(("ssh %s  (%s:.claude)" % (h, h), h + ":.claude"))
-    return locs + [("Other…  (path, or user@host:/path/.claude)", "")]
+                if not re.search(r"[*?!]", h) and h != "github.com" and h not in saved:
+                    items.append(("%s  (ssh config)" % h, h))
+    items.append(("Add remote…  (login + .pem key, saved for next time)", ADD))
+    v = menu(scr, title, items)
+    return add_remote(scr) if v == ADD else v
 
 
-def pick_location(scr, title, exclude=None):
-    v = menu(scr, title, [x for x in known_locations() if x[1] != exclude])
-    if v == "":
-        v = prompt(scr, title + "\nType a path or [user@]host:/path/.claude")
-    return v or None
+def pick_location(scr, title):
+    """Machine, then a Claude config dir on it (auto-discovered). Returns a location string or None."""
+    while True:
+        machine = pick_machine(scr, title + " - which machine?")
+        if machine is None:
+            return None
+        where = machine if machine != LOCAL else "this machine"
+        notice(scr, "Looking for Claude data on %s …" % where, wait=False)
+        dirs = [r[0] for r in run_on(machine, "dirs")]
+        if len(dirs) == 1:
+            return loc_of(machine, dirs[0])
+        while True:
+            items = [(d, d) for d in dirs] + [("Scan the whole machine…", "@scan"), ("Type a path…", "@type")]
+            v = menu(scr, title + " - which Claude config dir?" + ("" if dirs else "\n(none found in the usual places)"), items)
+            if v is None:
+                break
+            if v == "@scan":
+                notice(scr, "Scanning %s for .claude folders (can take a while) …" % where, wait=False)
+                dirs = [r[0] for r in run_on(machine, "scan")]
+                continue
+            if v == "@type":
+                v = prompt(scr, "Path of the .claude dir on that machine")
+                if not v:
+                    continue
+            return loc_of(machine, v)
 
 
 def pick_project(scr, title, loc, prefer, same_as=None):
@@ -238,52 +376,54 @@ def tui(scr):
     while True:
         try:
             if step == 0:
-                v = pick_location(scr, "Copy FROM which Claude config dir?")
+                v = pick_location(scr, "Copy FROM")
                 if not v:
                     return None
-                st["src"], step = norm(v), 1
+                st = {"src": v}
+                step = 1
             elif step == 1:
-                v = pick_location(scr, "Copy TO which Claude config dir?", exclude=st["src"])
+                v = pick_project(scr, "Project on %s" % st["src"], st["src"], guess_project())
                 if not v:
                     step = 0
                     continue
-                st["dst"], step = norm(v), 2
+                st["proj"], step = v, 2
             elif step == 2:
-                v = pick_project(scr, "Project on %s" % st["src"], st["src"], guess_project())
-                if not v:
-                    step = 1
-                    continue
-                st["proj"], step = v, 3
-            elif step == 3:
-                v = pick_project(scr, "Project on destination %s" % st["dst"], st["dst"], st["proj"], same_as=st["proj"])
-                if not v:
-                    step = 2
-                    continue
-                st["dproj"], step = v, 4
-            elif step == 4:
                 notice(scr, "Loading sessions …", wait=False)
                 rows = query(st["src"], "sessions", st["proj"])
                 if not rows:
                     notice(scr, "No sessions in %s/projects/%s" % (st["src"], st["proj"]))
-                    step = 2
+                    step = 1
                     continue
                 items = [("%s %6s MB  %s  %s" % (r[1], r[2], r[0][:8], r[3][:60]), r[0]) for r in rows]
                 v = menu(scr, "Sessions to copy (%d)" % len(items), items, multi=True)
                 if v is None:
-                    step = 3
+                    step = 1
                     continue
-                st["ids"], step = v, 5
-            elif step == 5:
-                v = menu(scr, "Copy %d session(s)\n  %s/projects/%s\n  -> %s/projects/%s" % (
+                st["ids"], step = v, 3
+            elif step == 3:
+                v = pick_location(scr, "Copy TO")
+                if not v:
+                    step = 2
+                    continue
+                if v == st["src"]:
+                    notice(scr, "Destination is the same as the source.")
+                    continue
+                st["dst"], st["dproj"], step = v, st["proj"], 4
+            elif step == 4:
+                v = menu(scr, "Copy %d session(s)\n  from %s/projects/%s\n  to   %s/projects/%s" % (
                     len(st["ids"]), st["src"], st["proj"], st["dst"], st["dproj"]),
-                    [("Copy", "go"), ("Dry run", "dry"), ("Back", "back"), ("Cancel", "cancel")])
+                    [("Copy", "go"), ("Dry run (copy nothing)", "dry"), ("Change destination project…", "proj"),
+                     ("Back", "back"), ("Cancel", "cancel")])
                 if v in (None, "back"):
-                    step = 4
-                    continue
-                if v == "cancel":
+                    step = 3
+                elif v == "cancel":
                     return None
-                st["dry"] = v == "dry"
-                return st
+                elif v == "proj":
+                    p = pick_project(scr, "Project on destination %s" % st["dst"], st["dst"], st["proj"], same_as=st["proj"])
+                    st["dproj"] = p or st["dproj"]
+                else:
+                    st["dry"] = v == "dry"
+                    return st
         except Fail as e:
             notice(scr, str(e))
             step = max(0, step - 1)
@@ -297,10 +437,33 @@ def interactive():
     for sid in st["ids"]:
         copy_one(sid, st["src"], st["dst"], st["proj"], st["dproj"], st["dry"])
         print("%s%s: %s -> %s" % ("(dry run) " if st["dry"] else "", sid, st["src"], st["dst"]))
-    key = " -i " + shlex.quote(SSH_OPTS[1]) if "-i" in SSH_OPTS else ""
+    key = " -i " + shlex.quote(SSH_OPTS[SSH_OPTS.index("-i") + 1]) if "-i" in SSH_OPTS else ""
     print("\nSame thing non-interactively:\n  cc-session%s %s %s %s --project=%s --dest-project=%s" % (
         key, st["ids"][0], st["src"], st["dst"], st["proj"], st["dproj"]))
     return 0
+
+
+def remote_cmd(a):
+    hosts, sub = load_hosts(), a.args[1] if len(a.args) > 1 else ""
+    if sub == "list":
+        for n, h in hosts.items():
+            print("%s  %s%s%s" % (n, h["target"], "  key=" + h["key"] if h.get("key") else "", "  port=%s" % h["port"] if h.get("port") else ""))
+    elif sub == "rm" and len(a.args) == 3:
+        hosts.pop(a.args[2], None)
+        save_hosts(hosts)
+    elif sub == "add" and len(a.args) == 4:
+        name, target = a.args[2], a.args[3]
+        hosts[name] = {"target": target, **({"key": os.path.expanduser(a.identity)} if a.identity else {}), **({"port": a.port} if a.port else {})}
+        save_hosts(hosts)
+        try:
+            found = run_on(name, "dirs")
+        except Fail:
+            hosts.pop(name)
+            save_hosts(hosts)
+            raise
+        print("saved %s; Claude data found in: %s" % (name, ", ".join(r[0] for r in found) or "(nowhere yet)"))
+    else:
+        raise Fail("usage: cc-session remote add NAME user@host [-i KEY] [--port N] | list | rm NAME")
 
 
 def main():
@@ -309,6 +472,7 @@ def main():
     ap.add_argument("-p", "--project", dest="proj", help="project dir name (default: from current directory)")
     ap.add_argument("-P", "--dest-project", dest="dproj", help="project dir name on the destination, if different")
     ap.add_argument("-i", "--identity", metavar="KEY", help="ssh private key (.pem) for remote locations")
+    ap.add_argument("--port", type=int, help="ssh port (with 'remote add')")
     ap.add_argument("-n", dest="dry", action="store_true", help="dry run")
     a = ap.parse_args()
     if a.identity:
@@ -320,11 +484,13 @@ def main():
                 return 1
             return interactive()
         proj = a.proj or guess_project()
-        if a.args[0] == "list" and len(a.args) == 2:
-            for r in query(norm(a.args[1]), "sessions", proj):
+        if a.args[0] == "remote":
+            remote_cmd(a)
+        elif a.args[0] == "list" and len(a.args) == 2:
+            for r in query(a.args[1], "sessions", proj):
                 print("%s  %s  %6s MB  %s" % (r[0], r[1], r[2], r[3][:70]))
         elif len(a.args) == 3:
-            copy_one(a.args[0], norm(a.args[1]), norm(a.args[2]), proj, a.dproj or proj, a.dry)
+            copy_one(a.args[0], a.args[1], a.args[2], proj, a.dproj or proj, a.dry)
             print("copied %s: %s -> %s" % (a.args[0], a.args[1], a.args[2]))
         else:
             ap.print_help()
