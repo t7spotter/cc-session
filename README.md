@@ -5,7 +5,7 @@ interface. Uses `rsync` over `ssh`; no other dependencies.
 
 ## Install
 
-Needs `python3` (3.8+), `rsync` (3.2.3+) and `ssh` on this machine; remote hosts need `python3` too.
+Needs `python3` (3.8+), `rsync` (any version, including the 2.6.9 that macOS ships) and `ssh` on this machine; remote hosts need `python3` too.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/t7spotter/cc-session/main/install.sh | sh   # -> ~/.local/bin/cc-session

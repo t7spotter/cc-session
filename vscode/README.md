@@ -5,7 +5,7 @@ Copy Claude Code sessions between users or machines from the command palette
 
 It drives the `cc-session` tool in the parent folder: remotes are saved in `~/.config/cc-session/hosts.json`
 (shared with the CLI), Claude data is auto-discovered, and files move with `rsync` over `ssh`.
-Needs `python3`, `rsync` (3.2.3+) and `ssh` on this machine, and `python3` on remote ones. macOS/Linux (or WSL).
+Needs `python3`, `rsync` (any version, including the 2.6.9 that macOS ships) and `ssh` on this machine, and `python3` on remote ones. macOS/Linux (or WSL).
 
 ## Build and install
 

@@ -50,6 +50,9 @@ if mode == "projects":
         if os.path.isdir(d):
             print("%s\t%d" % (p, sum(f.endswith(".jsonl") for f in os.listdir(d))))
     sys.exit()
+if mode == "has":
+    print(1 if os.path.isdir(os.path.join(root, sys.argv[3], sys.argv[4])) else "", end="")
+    sys.exit()
 if mode == "delete":
     import re, shutil
     proj, sid = sys.argv[3], sys.argv[4]
@@ -170,7 +173,7 @@ def guess_project():
 # ---------- copying ----------
 
 def run_rsync(opts, args):
-    if subprocess.run(["rsync", "-a", "--mkpath", "-e", shlex.join(["ssh", *opts])] + args).returncode:
+    if subprocess.run(["rsync", "-a", "-e", shlex.join(["ssh", *opts])] + args).returncode:
         raise Fail("rsync failed")
 
 
@@ -192,15 +195,26 @@ def copy_one(sid, src, dst, proj, dproj, dry=False):
     D = "%s%s/" % (dt + ":" if dt else "", to)
     extra = (["-n"] if dry else []) + ([] if dt else owner_args(dp))
     tmp = None
+    # Not rsync's --mkpath / --ignore-missing-args: macOS ships rsync 2.6.9, which has neither.
+    has_data = bool(query(src, "has", proj, sid))
     try:
         if st and dt:  # rsync cannot copy remote to remote; go through this machine
             tmp = tempfile.mkdtemp()
             run_rsync(so, [S(sid + ".jsonl"), tmp + "/"])
-            run_rsync(so, ["--ignore-missing-args", S(sid), tmp + "/"])
+            if has_data:
+                run_rsync(so, [S(sid), tmp + "/"])
             S = lambda name: "%s/%s" % (tmp, name)
         opts = do if dt else so
+        if not dry:
+            if dt:
+                r = subprocess.run(["ssh", *do, "-o", "BatchMode=yes", dt, "mkdir", "-p", shlex.quote(to)], capture_output=True, text=True)
+                if r.returncode:
+                    raise Fail("cannot create %s: %s" % (to, r.stderr.strip()))
+            else:
+                os.makedirs(to, exist_ok=True)
         run_rsync(opts, ["--partial"] + extra + [S(sid + ".jsonl"), D])
-        run_rsync(opts, ["--ignore-missing-args"] + extra + [S(sid), D])
+        if has_data:
+            run_rsync(opts, extra + [S(sid), D])
     finally:
         if tmp:
             shutil.rmtree(tmp, ignore_errors=True)
