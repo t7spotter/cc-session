@@ -53,6 +53,40 @@ if mode == "projects":
 if mode == "has":
     print(1 if os.path.isdir(os.path.join(root, sys.argv[3], sys.argv[4])) else "", end="")
     sys.exit()
+if mode == "show":
+    path = os.path.join(root, sys.argv[3], sys.argv[4] + ".jsonl")
+    out, size = [], 0
+    def add(t):
+        global size
+        size += len(t)
+        out.append(t)
+    for line in open(path, errors="replace") if os.path.isfile(path) else []:
+        try:
+            m = json.loads(line)
+        except Exception:
+            continue
+        who = m.get("type")
+        if who not in ("user", "assistant") or m.get("isMeta"):
+            continue
+        c = m.get("message", {}).get("content", "")
+        if isinstance(c, str):
+            c = [{"type": "text", "text": c}]
+        for b in c if isinstance(c, list) else []:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "text" and b.get("text", "").strip():
+                t = b["text"].strip()
+                if who == "user" and t.startswith("<"):
+                    continue
+                add("## %s\n\n%s\n\n" % ("You" if who == "user" else "Claude", t))
+            elif b.get("type") == "tool_use":
+                arg = json.dumps(b.get("input", {}), ensure_ascii=False)
+                add("> tool: `%s` %s\n\n" % (b.get("name", "?"), arg[:200].replace("\n", " ")))
+        if size > 3000000:
+            add("\n*(truncated)*\n")
+            break
+    print(json.dumps("".join(out) or "(no messages)"))
+    sys.exit()
 if mode == "delete":
     import re, shutil
     proj, sid = sys.argv[3], sys.argv[4]
@@ -529,11 +563,13 @@ def api_cmd(a):
         out = [{"name": n, "sessions": int(c)} for n, c in query(rest[0], "projects")]
     elif cmd == "sessions" and len(rest) == 1 and a.proj:
         out = [{"id": r[0], "modified": r[1], "mb": r[2], "title": r[3]} for r in query(rest[0], "sessions", a.proj)]
+    elif cmd == "show" and len(rest) == 2 and a.proj:
+        out = json.loads(query(rest[0], "show", a.proj, rest[1])[0][0])
     elif cmd == "delete" and len(rest) == 2 and a.proj:
         delete_one(rest[1], rest[0], a.proj)
         out = True
     else:
-        raise Fail("usage: cc-session api machines | keys | dirs M | scan M | projects LOC | sessions LOC --project=P | delete LOC ID --project=P")
+        raise Fail("usage: cc-session api machines | keys | dirs M | scan M | projects LOC | sessions LOC --project=P | show LOC ID --project=P | delete LOC ID --project=P")
     print(json.dumps(out))
 
 

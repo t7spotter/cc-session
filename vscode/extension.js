@@ -212,7 +212,8 @@ class SessionTree {
         return (await api(this.ctx, "sessions", parent.where, `--project=${parent.project}`)).map((r) =>
           this.node(r.title || r.id.slice(0, 8), C.None, "comment-discussion", {
             kind: "session", where: parent.where, project: parent.project, sessionId: r.id,
-            description: `${r.modified}  ${r.mb} MB`, tooltip: r.id, contextValue: "session" }));
+            description: `${r.modified}  ${r.mb} MB`, tooltip: r.id, contextValue: "session",
+            command: { command: "ccSession.open", title: "Open session", arguments: [{ kind: "session", where: parent.where, project: parent.project, sessionId: r.id, label: r.title || r.id.slice(0, 8) }] } }));
       }
     } catch (e) {
       output.appendLine("error: " + e.message);
@@ -290,6 +291,13 @@ async function checkUpdate(ctx) {
   if (r) vscode.commands.executeCommand("workbench.action.reloadWindow");
 }
 
+async function openSession(ctx, node) {
+  if (!node || !node.sessionId) return;
+  const md = await busy("Loading session …", () => api(ctx, "show", node.where, node.sessionId, `--project=${node.project}`));
+  const doc = await vscode.workspace.openTextDocument({ language: "markdown", content: `# ${node.label}\n\n${node.sessionId} on ${node.where}\n\n${md}` });
+  await vscode.window.showTextDocument(doc, { preview: true });
+}
+
 const guard = (ctx, fn) => async (...args) => {
   try {
     await fn(ctx, ...args);
@@ -309,6 +317,7 @@ exports.activate = (ctx) => {
     vscode.commands.registerCommand("ccSession.copy", guard(ctx, copy)),
     vscode.commands.registerCommand("ccSession.openSshConfig", guard(ctx, openSshConfig)),
     vscode.commands.registerCommand("ccSession.checkUpdate", guard(ctx, checkUpdate)),
+    vscode.commands.registerCommand("ccSession.open", guard(ctx, openSession)),
     vscode.commands.registerCommand("ccSession.delete", guard(ctx, del)),
     vscode.commands.registerCommand("ccSession.addRemote", guard(ctx, async (c) => {
       const name = await addRemote(c);
