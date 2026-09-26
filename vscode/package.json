@@ -2,7 +2,7 @@
   "name": "cc-session",
   "displayName": "Claude Sessions Transfer",
   "description": "Copy Claude Code sessions between users and machines (rsync over ssh).",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "t7spotter",
   "private": true,
   "engines": {
@@ -26,6 +26,18 @@
         "title": "Delete Sessions\u2026",
         "category": "Claude Sessions",
         "icon": "$(trash)"
+      },
+      {
+        "command": "ccSession.openSshConfig",
+        "title": "Open SSH Config File",
+        "category": "Claude Sessions",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "ccSession.checkUpdate",
+        "title": "Check for Updates",
+        "category": "Claude Sessions",
+        "icon": "$(cloud-download)"
       },
       {
         "command": "ccSession.addRemote",
@@ -65,6 +77,8 @@
     },
     "menus": {
       "view/title": [
+        { "command": "ccSession.openSshConfig", "group": "navigation@4", "when": "view == ccSessionTree" },
+        { "command": "ccSession.checkUpdate", "group": "navigation@5", "when": "view == ccSessionTree" },
         {
           "command": "ccSession.copy",
           "group": "navigation@1",

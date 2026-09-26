@@ -2,6 +2,8 @@ const vscode = require("vscode");
 const cp = require("child_process");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
+const https = require("https");
 
 const LOCAL = "@local";
 let output;
@@ -220,6 +222,49 @@ class SessionTree {
   }
 }
 
+// ~/.ssh/config on the machine the extension runs on, which is where cc-session reads its hosts from.
+async function openSshConfig() {
+  const file = path.join(os.homedir(), ".ssh", "config");
+  if (!fs.existsSync(file)) {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(file, "# Host myserver\n#   HostName 1.2.3.4\n#   User root\n#   IdentityFile ~/.ssh/key.pem\n", { mode: 0o600 });
+  }
+  await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(file));
+}
+
+function latestRelease() {
+  return new Promise((resolve, reject) => {
+    const req = https.get("https://api.github.com/repos/t7spotter/cc-session/releases/latest",
+      { headers: { "User-Agent": "cc-session-vscode", Accept: "application/vnd.github+json" }, timeout: 10000 }, (res) => {
+        let body = "";
+        res.on("data", (d) => (body += d));
+        res.on("end", () => {
+          if (res.statusCode !== 200) return reject(new Error(`GitHub answered ${res.statusCode}`));
+          try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
+        });
+      });
+    req.on("timeout", () => req.destroy(new Error("GitHub did not answer in time")));
+    req.on("error", reject);
+  });
+}
+
+const newer = (a, b) => {
+  const x = a.split(".").map(Number), y = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  return false;
+};
+
+async function checkUpdate(ctx) {
+  const rel = await busy("Checking for updates …", latestRelease);
+  const latest = String(rel.tag_name || "").replace(/^v/, "");
+  const mine = ctx.extension.packageJSON.version;
+  if (!newer(latest, mine)) return vscode.window.showInformationMessage(`Claude Sessions ${mine} is up to date.`);
+  const pick = await vscode.window.showInformationMessage(
+    `Claude Sessions ${latest} is available (you have ${mine}). Download the .vsix from the release page and install it with "Extensions: Install from VSIX…".`,
+    "Open release page");
+  if (pick) vscode.env.openExternal(vscode.Uri.parse(rel.html_url));
+}
+
 const guard = (ctx, fn) => async (...args) => {
   try {
     await fn(ctx, ...args);
@@ -237,6 +282,8 @@ exports.activate = (ctx) => {
     vscode.window.createTreeView("ccSessionTree", { treeDataProvider: tree }),
     vscode.commands.registerCommand("ccSession.refresh", () => tree.refresh()),
     vscode.commands.registerCommand("ccSession.copy", guard(ctx, copy)),
+    vscode.commands.registerCommand("ccSession.openSshConfig", guard(ctx, openSshConfig)),
+    vscode.commands.registerCommand("ccSession.checkUpdate", guard(ctx, checkUpdate)),
     vscode.commands.registerCommand("ccSession.delete", guard(ctx, del)),
     vscode.commands.registerCommand("ccSession.addRemote", guard(ctx, async (c) => {
       const name = await addRemote(c);
