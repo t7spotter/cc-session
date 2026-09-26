@@ -5,21 +5,82 @@
   "version": "0.1.0",
   "publisher": "t7spotter",
   "private": true,
-  "engines": { "vscode": "^1.80.0" },
-  "categories": ["Other"],
-  "main": "./extension.js",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension-with-ui.js",
   "activationEvents": [],
   "contributes": {
     "commands": [
-      { "command": "ccSession.copy", "title": "Copy Sessions…", "category": "Claude Sessions" },
-      { "command": "ccSession.addRemote", "title": "Add Remote…", "category": "Claude Sessions" }
+      {
+        "command": "ccSession.copy",
+        "title": "Copy Sessions\u2026",
+        "category": "Claude Sessions"
+      },
+      {
+        "command": "ccSession.addRemote",
+        "title": "Add Remote\u2026",
+        "category": "Claude Sessions"
+      },
+      {
+        "command": "ccSession.refresh",
+        "title": "Refresh",
+        "category": "Claude Sessions",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "ccSession.copyOne",
+        "title": "Copy to Another Machine",
+        "category": "Claude Sessions"
+      }
     ],
     "configuration": {
       "title": "Claude Sessions",
       "properties": {
-        "ccSession.path": { "type": "string", "default": "", "description": "Path to a cc-session executable. Empty uses the copy bundled with the extension." },
-        "ccSession.pythonPath": { "type": "string", "default": "python3", "description": "Python 3 used to run the bundled cc-session." }
+        "ccSession.path": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a cc-session executable. Empty uses the copy bundled with the extension."
+        },
+        "ccSession.pythonPath": {
+          "type": "string",
+          "default": "python3",
+          "description": "Python 3 used to run the bundled cc-session."
+        }
       }
+    },
+    "views": {
+      "activitybar": [
+        {
+          "id": "ccSessionTree",
+          "name": "Claude Sessions",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "ccSession.refresh",
+          "group": "navigation",
+          "when": "view == ccSessionTree"
+        },
+        {
+          "command": "ccSession.addRemote",
+          "group": "navigation",
+          "when": "view == ccSessionTree"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "ccSession.copyOne",
+          "group": "inline",
+          "when": "viewItem == session"
+        }
+      ]
     }
   },
   "scripts": {
