@@ -1,0 +1,338 @@
+#!/usr/bin/env python3
+"""Copy Claude Code sessions between .claude dirs, local or over ssh (rsync).
+
+  cc-session                                  interactive (arrow keys)
+  cc-session [-i KEY.pem] ...                 key for remote hosts (or set CC_SESSION_SSH_OPTS)
+  cc-session ID FROM TO [-p PROJ] [-P DEST_PROJ] [-n]
+  cc-session list LOCATION [-p PROJ]
+
+LOCATION is a Claude config dir: /home/me/.claude or host:/root/.claude
+(a relative remote path such as host:.claude is relative to that user's home).
+"""
+import argparse, curses, glob, os, re, shlex, shutil, subprocess, sys, tempfile
+
+SSH_OPTS = shlex.split(os.environ.get("CC_SESSION_SSH_OPTS", ""))
+
+REMOTE = r'''
+import json, os, sys, time
+mode, root = sys.argv[1], os.path.join(os.path.expanduser(sys.argv[2]), "projects")
+if mode == "projects":
+    for p in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+        d = os.path.join(root, p)
+        if os.path.isdir(d):
+            print("%s\t%d" % (p, sum(f.endswith(".jsonl") for f in os.listdir(d))))
+    sys.exit()
+d = os.path.join(root, sys.argv[3])
+rows = []
+for f in os.listdir(d) if os.path.isdir(d) else []:
+    if not f.endswith(".jsonl"):
+        continue
+    sid, path = f[:-6], os.path.join(d, f)
+    title = ""
+    try:
+        title = json.load(open(os.path.join(d, sid, "custom-title.json"))).get("customTitle", "")
+    except Exception:
+        pass
+    if not title:
+        try:
+            for line in open(path, errors="replace"):
+                if '"type":"user"' not in line[:400]:
+                    continue
+                c = json.loads(line).get("message", {}).get("content", "")
+                if isinstance(c, list):
+                    c = " ".join(b.get("text", "") for b in c if isinstance(b, dict))
+                if c.strip() and not c.lstrip().startswith("<"):
+                    title = c.strip().replace("\n", " ")
+                    break
+        except Exception:
+            pass
+    st = os.stat(path)
+    rows.append((st.st_mtime, sid, st.st_size, title))
+for m, sid, size, t in sorted(rows, reverse=True):
+    print("\t".join([sid, time.strftime("%m-%d %H:%M", time.localtime(m)), "%.1f" % (size / 1e6), t]))
+'''
+
+
+class Fail(Exception):
+    pass
+
+
+def split(loc):
+    m = re.match(r"^([^/:]+):(.*)$", loc)
+    return (m.group(1), m.group(2) or ".claude") if m else (None, loc)
+
+
+def norm(loc):
+    return loc.rstrip("/") or "/"
+
+
+def query(loc, *args):
+    host, path = split(loc)
+    if host:
+        cmd = ["ssh", *SSH_OPTS, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "python3", "-", args[0], path, *args[1:]]
+        r = subprocess.run(cmd, input=REMOTE, capture_output=True, text=True)
+    else:
+        r = subprocess.run(["python3", "-c", REMOTE, args[0], path, *args[1:]], capture_output=True, text=True)
+    if r.returncode:
+        raise Fail("%s: %s" % (loc, r.stderr.strip() or "failed (needs python3 and key-based ssh)"))
+    return [l.split("\t") for l in r.stdout.splitlines() if l]
+
+
+def guess_project():
+    return re.sub(r"[^A-Za-z0-9]", "-", os.getcwd())
+
+
+def run_rsync(args):
+    if subprocess.run(["rsync", "-a", "--mkpath", "-e", shlex.join(["ssh", *SSH_OPTS])] + args).returncode:
+        raise Fail("rsync failed")
+
+
+def owner_args(dst):
+    # Running as root into another user's ~/.claude would leave root-owned 0600 files they cannot read.
+    if split(dst)[0] or os.geteuid() != 0 or not os.path.isdir(dst):
+        return []
+    st = os.stat(dst)
+    return ["--chown=%d:%d" % (st.st_uid, st.st_gid)] if st.st_uid else []
+
+
+def copy_one(sid, src, dst, proj, dproj, dry=False):
+    if not re.fullmatch(r"[0-9a-f-]{36}", sid):
+        raise Fail("not a session id: " + sid)
+    frm = "%s/projects/%s" % (norm(src), proj)
+    to = "%s/projects/%s" % (norm(dst), dproj)
+    n = (["-n"] if dry else []) + owner_args(norm(dst))
+    tmp = None
+    try:
+        if split(src)[0] and split(dst)[0]:  # rsync cannot copy remote to remote; go through this machine
+            tmp = tempfile.mkdtemp()
+            run_rsync(["%s/%s.jsonl" % (frm, sid), tmp + "/"])
+            run_rsync(["--ignore-missing-args", "%s/%s" % (frm, sid), tmp + "/"])
+            frm = tmp
+        run_rsync(["--partial"] + n + ["%s/%s.jsonl" % (frm, sid), to + "/"])
+        run_rsync(["--ignore-missing-args"] + n + ["%s/%s" % (frm, sid), to + "/"])
+    finally:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---------- curses UI ----------
+
+def frame(scr, title, hint):
+    scr.erase()
+    h, w = scr.getmaxyx()
+    for i, line in enumerate(title.split("\n")):
+        scr.addnstr(i, 0, line, w - 1, curses.A_BOLD if i == 0 else 0)
+    scr.addnstr(h - 1, 0, hint, w - 1, curses.A_DIM)
+    return h, w, len(title.split("\n")) + 1
+
+
+def menu(scr, title, items, multi=False, start=0):
+    """items: [(label, value)]. Returns the value (a list when multi); None on Esc."""
+    hint = "up/down move  space select  a all  enter confirm  esc back" if multi else "up/down move  enter select  esc back"
+    cur, top, chosen = start, 0, set()
+    while True:
+        h, w, y0 = frame(scr, title, hint)
+        rows = max(1, h - y0 - 1)
+        top = min(max(top, cur - rows + 1), cur)
+        for i in range(top, min(len(items), top + rows)):
+            mark = ("[x] " if i in chosen else "[ ] ") if multi else ""
+            line = ("> " if i == cur else "  ") + mark + items[i][0]
+            scr.addnstr(y0 + i - top, 0, line, w - 1, curses.A_REVERSE if i == cur else 0)
+        scr.refresh()
+        k = scr.getch()
+        if k in (curses.KEY_UP, ord("k")):
+            cur = max(0, cur - 1)
+        elif k in (curses.KEY_DOWN, ord("j")):
+            cur = min(len(items) - 1, cur + 1)
+        elif k == curses.KEY_PPAGE:
+            cur = max(0, cur - rows)
+        elif k == curses.KEY_NPAGE:
+            cur = min(len(items) - 1, cur + rows)
+        elif k == curses.KEY_HOME:
+            cur = 0
+        elif k == curses.KEY_END:
+            cur = len(items) - 1
+        elif multi and k == ord(" "):
+            chosen ^= {cur}
+        elif multi and k == ord("a"):
+            chosen = set() if len(chosen) == len(items) else set(range(len(items)))
+        elif k in (10, 13, curses.KEY_ENTER):
+            if not multi:
+                return items[cur][1]
+            if chosen:
+                return [items[i][1] for i in sorted(chosen)]
+        elif k in (27, ord("q")):
+            return None
+
+
+def prompt(scr, title, default=""):
+    buf = list(default)
+    curses.curs_set(1)
+    try:
+        while True:
+            h, w, y0 = frame(scr, title, "enter confirm  ctrl-u clear  esc back")
+            scr.addnstr(y0, 0, "> " + "".join(buf), w - 1)
+            scr.move(y0, min(w - 1, 2 + len(buf)))
+            scr.refresh()
+            k = scr.get_wch()
+            if k in ("\n", "\r"):
+                return "".join(buf).strip()
+            if k == "\x1b":
+                return None
+            if k in ("\x7f", "\b", curses.KEY_BACKSPACE):
+                buf = buf[:-1]
+            elif k == "\x15":
+                buf = []
+            elif isinstance(k, str) and k.isprintable():
+                buf.append(k)
+    finally:
+        curses.curs_set(0)
+
+
+def notice(scr, text, wait=True):
+    frame(scr, text, "press any key" if wait else "")
+    scr.refresh()
+    if wait:
+        scr.getch()
+
+
+def known_locations():
+    home = os.path.expanduser("~/.claude")
+    locs = [("This machine  (%s)" % home, home)]
+    for p in sorted(glob.glob("/home/*/.claude")):
+        if p != home and os.access(os.path.join(p, "projects"), os.R_OK):
+            locs.append(("Local user %s  (%s)" % (p.split("/")[2], p), p))
+    cfg = os.path.expanduser("~/.ssh/config")
+    if os.path.exists(cfg):
+        for m in re.finditer(r"(?im)^\s*host\s+(.+)$", open(cfg).read()):
+            for h in m.group(1).split():
+                if not re.search(r"[*?!]", h) and h != "github.com":
+                    locs.append(("ssh %s  (%s:.claude)" % (h, h), h + ":.claude"))
+    return locs + [("Other…  (path, or user@host:/path/.claude)", "")]
+
+
+def pick_location(scr, title, exclude=None):
+    v = menu(scr, title, [x for x in known_locations() if x[1] != exclude])
+    if v == "":
+        v = prompt(scr, title + "\nType a path or [user@]host:/path/.claude")
+    return v or None
+
+
+def pick_project(scr, title, loc, prefer, same_as=None):
+    notice(scr, "Loading projects from %s …" % loc, wait=False)
+    projs = sorted(query(loc, "projects"), key=lambda r: (r[0] != prefer, r[0]))
+    items = [("%s  (%s sessions)" % (n, c), n) for n, c in projs if n != same_as]
+    if same_as:
+        items.insert(0, ("%s  (same as source)" % same_as, same_as))
+    items.append(("Other…  (type a project directory name)", ""))
+    v = menu(scr, title, items)
+    if v == "":
+        v = prompt(scr, title, prefer)
+    return v or None
+
+
+def tui(scr):
+    curses.curs_set(0)
+    scr.keypad(True)
+    step, st = 0, {}
+    while True:
+        try:
+            if step == 0:
+                v = pick_location(scr, "Copy FROM which Claude config dir?")
+                if not v:
+                    return None
+                st["src"], step = norm(v), 1
+            elif step == 1:
+                v = pick_location(scr, "Copy TO which Claude config dir?", exclude=st["src"])
+                if not v:
+                    step = 0
+                    continue
+                st["dst"], step = norm(v), 2
+            elif step == 2:
+                v = pick_project(scr, "Project on %s" % st["src"], st["src"], guess_project())
+                if not v:
+                    step = 1
+                    continue
+                st["proj"], step = v, 3
+            elif step == 3:
+                v = pick_project(scr, "Project on destination %s" % st["dst"], st["dst"], st["proj"], same_as=st["proj"])
+                if not v:
+                    step = 2
+                    continue
+                st["dproj"], step = v, 4
+            elif step == 4:
+                notice(scr, "Loading sessions …", wait=False)
+                rows = query(st["src"], "sessions", st["proj"])
+                if not rows:
+                    notice(scr, "No sessions in %s/projects/%s" % (st["src"], st["proj"]))
+                    step = 2
+                    continue
+                items = [("%s %6s MB  %s  %s" % (r[1], r[2], r[0][:8], r[3][:60]), r[0]) for r in rows]
+                v = menu(scr, "Sessions to copy (%d)" % len(items), items, multi=True)
+                if v is None:
+                    step = 3
+                    continue
+                st["ids"], step = v, 5
+            elif step == 5:
+                v = menu(scr, "Copy %d session(s)\n  %s/projects/%s\n  -> %s/projects/%s" % (
+                    len(st["ids"]), st["src"], st["proj"], st["dst"], st["dproj"]),
+                    [("Copy", "go"), ("Dry run", "dry"), ("Back", "back"), ("Cancel", "cancel")])
+                if v in (None, "back"):
+                    step = 4
+                    continue
+                if v == "cancel":
+                    return None
+                st["dry"] = v == "dry"
+                return st
+        except Fail as e:
+            notice(scr, str(e))
+            step = max(0, step - 1)
+
+
+def interactive():
+    st = curses.wrapper(tui)
+    if not st:
+        print("cancelled")
+        return 0
+    for sid in st["ids"]:
+        copy_one(sid, st["src"], st["dst"], st["proj"], st["dproj"], st["dry"])
+        print("%s%s: %s -> %s" % ("(dry run) " if st["dry"] else "", sid, st["src"], st["dst"]))
+    key = " -i " + shlex.quote(SSH_OPTS[1]) if "-i" in SSH_OPTS else ""
+    print("\nSame thing non-interactively:\n  cc-session%s %s %s %s --project=%s --dest-project=%s" % (
+        key, st["ids"][0], st["src"], st["dst"], st["proj"], st["dproj"]))
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("args", nargs="*")
+    ap.add_argument("-p", "--project", dest="proj", help="project dir name (default: from current directory)")
+    ap.add_argument("-P", "--dest-project", dest="dproj", help="project dir name on the destination, if different")
+    ap.add_argument("-i", "--identity", metavar="KEY", help="ssh private key (.pem) for remote locations")
+    ap.add_argument("-n", dest="dry", action="store_true", help="dry run")
+    a = ap.parse_args()
+    if a.identity:
+        SSH_OPTS[:0] = ["-i", os.path.expanduser(a.identity), "-o", "IdentitiesOnly=yes"]
+    try:
+        if not a.args:
+            if not sys.stdin.isatty():
+                ap.print_help()
+                return 1
+            return interactive()
+        proj = a.proj or guess_project()
+        if a.args[0] == "list" and len(a.args) == 2:
+            for r in query(norm(a.args[1]), "sessions", proj):
+                print("%s  %s  %6s MB  %s" % (r[0], r[1], r[2], r[3][:70]))
+        elif len(a.args) == 3:
+            copy_one(a.args[0], norm(a.args[1]), norm(a.args[2]), proj, a.dproj or proj, a.dry)
+            print("copied %s: %s -> %s" % (a.args[0], a.args[1], a.args[2]))
+        else:
+            ap.print_help()
+            return 1
+    except Fail as e:
+        print("error:", e, file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
