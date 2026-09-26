@@ -2,7 +2,7 @@
   "name": "cc-session",
   "displayName": "Claude Sessions Transfer",
   "description": "Copy Claude Code sessions between users and machines (rsync over ssh).",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "publisher": "t7spotter",
   "private": true,
   "engines": {

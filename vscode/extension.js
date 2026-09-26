@@ -248,6 +248,24 @@ function latestRelease() {
   });
 }
 
+// GitHub serves release assets through a redirect to another host.
+function download(url, file, hops = 0) {
+  return new Promise((resolve, reject) => {
+    if (hops > 5) return reject(new Error("too many redirects"));
+    https.get(url, { headers: { "User-Agent": "cc-session-vscode" }, timeout: 30000 }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        return resolve(download(res.headers.location, file, hops + 1));
+      }
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error(`download failed: ${res.statusCode}`)); }
+      const out = fs.createWriteStream(file);
+      res.pipe(out);
+      out.on("finish", () => out.close(resolve));
+      out.on("error", reject);
+    }).on("error", reject).on("timeout", function () { this.destroy(new Error("download timed out")); });
+  });
+}
+
 const newer = (a, b) => {
   const x = a.split(".").map(Number), y = b.split(".").map(Number);
   for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
@@ -259,10 +277,17 @@ async function checkUpdate(ctx) {
   const latest = String(rel.tag_name || "").replace(/^v/, "");
   const mine = ctx.extension.packageJSON.version;
   if (!newer(latest, mine)) return vscode.window.showInformationMessage(`Claude Sessions ${mine} is up to date.`);
+  const asset = (rel.assets || []).find((x) => /\.vsix$/.test(x.name));
   const pick = await vscode.window.showInformationMessage(
-    `Claude Sessions ${latest} is available (you have ${mine}). Download the .vsix from the release page and install it with "Extensions: Install from VSIX…".`,
-    "Open release page");
-  if (pick) vscode.env.openExternal(vscode.Uri.parse(rel.html_url));
+    `Claude Sessions ${latest} is available (you have ${mine}).`, ...(asset ? ["Update now"] : []), "Release page");
+  if (pick === "Release page") return vscode.env.openExternal(vscode.Uri.parse(rel.html_url));
+  if (pick !== "Update now") return;
+  const file = path.join(os.tmpdir(), asset.name);
+  await busy(`Downloading ${asset.name} …`, () => download(asset.browser_download_url, file));
+  await vscode.commands.executeCommand("workbench.extensions.installExtension", vscode.Uri.file(file));
+  fs.rmSync(file, { force: true });
+  const r = await vscode.window.showInformationMessage(`Claude Sessions ${latest} installed. Reload the window to use it.`, "Reload Window");
+  if (r) vscode.commands.executeCommand("workbench.action.reloadWindow");
 }
 
 const guard = (ctx, fn) => async (...args) => {
