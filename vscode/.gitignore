@@ -1,0 +1,3 @@
+bin/cc-session
+*.vsix
+node_modules/

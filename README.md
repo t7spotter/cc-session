@@ -30,3 +30,8 @@ Hosts in `~/.ssh/config` show up in the picker. `CC_SESSION_SSH_OPTS="-p 2222"` 
 Notes: remote listing uses `ssh -o BatchMode=yes`, so accept the host key once by hand first. Running as
 root into another local user's `~/.claude` sets file ownership to that user. Existing sessions with the same
 id are overwritten.
+
+## VS Code extension
+
+`vscode/` wraps this tool in command-palette pickers (`Claude Sessions: Copy Sessions…`, `Add Remote…`).
+Build with `cd vscode && npm run package`, install with `code --install-extension cc-session-0.1.0.vsix`.

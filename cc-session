@@ -314,7 +314,8 @@ def add_remote(scr):
     return name
 
 
-def pick_machine(scr, title):
+def machines():
+    """[(label, name)] for this machine, saved remotes and ssh config hosts."""
     items = [("This machine", LOCAL)]
     saved = load_hosts()
     items += [("%s  (%s)" % (n, h["target"]), n) for n, h in saved.items()]
@@ -324,8 +325,11 @@ def pick_machine(scr, title):
             for h in m.group(1).split():
                 if not re.search(r"[*?!]", h) and h != "github.com" and h not in saved:
                     items.append(("%s  (ssh config)" % h, h))
-    items.append(("Add remote…  (login + .pem key, saved for next time)", ADD))
-    v = menu(scr, title, items)
+    return items
+
+
+def pick_machine(scr, title):
+    v = menu(scr, title, machines() + [("Add remote…  (login + .pem key, saved for next time)", ADD)])
     return add_remote(scr) if v == ADD else v
 
 
@@ -466,6 +470,24 @@ def remote_cmd(a):
         raise Fail("usage: cc-session remote add NAME user@host [-i KEY] [--port N] | list | rm NAME")
 
 
+def api_cmd(a):
+    """Machine-readable queries used by the VS Code extension."""
+    cmd, rest = a.args[1] if len(a.args) > 1 else "", a.args[2:]
+    if cmd == "machines":
+        out = [{"label": l, "name": n} for l, n in machines()]
+    elif cmd == "keys":
+        out = ssh_keys()
+    elif cmd in ("dirs", "scan") and len(rest) == 1:
+        out = [r[0] for r in run_on(rest[0], cmd)]
+    elif cmd == "projects" and len(rest) == 1:
+        out = [{"name": n, "sessions": int(c)} for n, c in query(rest[0], "projects")]
+    elif cmd == "sessions" and len(rest) == 1 and a.proj:
+        out = [{"id": r[0], "modified": r[1], "mb": r[2], "title": r[3]} for r in query(rest[0], "sessions", a.proj)]
+    else:
+        raise Fail("usage: cc-session api machines | keys | dirs M | scan M | projects LOC | sessions LOC --project=P")
+    print(json.dumps(out))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("args", nargs="*")
@@ -484,7 +506,9 @@ def main():
                 return 1
             return interactive()
         proj = a.proj or guess_project()
-        if a.args[0] == "remote":
+        if a.args[0] == "api":
+            api_cmd(a)
+        elif a.args[0] == "remote":
             remote_cmd(a)
         elif a.args[0] == "list" and len(a.args) == 2:
             for r in query(a.args[1], "sessions", proj):
