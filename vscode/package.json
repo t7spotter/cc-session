@@ -11,30 +11,27 @@
   "categories": [
     "Other"
   ],
-  "main": "./extension-with-ui.js",
+  "main": "./extension.js",
   "activationEvents": [],
   "contributes": {
     "commands": [
       {
         "command": "ccSession.copy",
         "title": "Copy Sessions\u2026",
-        "category": "Claude Sessions"
+        "category": "Claude Sessions",
+        "icon": "$(cloud-upload)"
       },
       {
         "command": "ccSession.addRemote",
         "title": "Add Remote\u2026",
-        "category": "Claude Sessions"
+        "category": "Claude Sessions",
+        "icon": "$(add)"
       },
       {
         "command": "ccSession.refresh",
         "title": "Refresh",
         "category": "Claude Sessions",
         "icon": "$(refresh)"
-      },
-      {
-        "command": "ccSession.copyOne",
-        "title": "Copy to Another Machine",
-        "category": "Claude Sessions"
       }
     ],
     "configuration": {
@@ -53,32 +50,45 @@
       }
     },
     "views": {
-      "activitybar": [
+      "ccSessions": [
         {
           "id": "ccSessionTree",
-          "name": "Claude Sessions",
-          "icon": "media/icon.svg"
+          "name": "Sessions"
         }
       ]
     },
     "menus": {
       "view/title": [
         {
-          "command": "ccSession.refresh",
-          "group": "navigation",
+          "command": "ccSession.copy",
+          "group": "navigation@1",
           "when": "view == ccSessionTree"
         },
         {
           "command": "ccSession.addRemote",
-          "group": "navigation",
+          "group": "navigation@2",
+          "when": "view == ccSessionTree"
+        },
+        {
+          "command": "ccSession.refresh",
+          "group": "navigation@3",
           "when": "view == ccSessionTree"
         }
       ],
       "view/item/context": [
         {
-          "command": "ccSession.copyOne",
+          "command": "ccSession.copy",
           "group": "inline",
-          "when": "viewItem == session"
+          "when": "view == ccSessionTree && viewItem =~ /^(session|project)$/"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ccSessions",
+          "title": "Claude Sessions",
+          "icon": "media/icon.svg"
         }
       ]
     }
