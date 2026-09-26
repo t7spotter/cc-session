@@ -5,6 +5,7 @@
   cc-session remote add NAME user@host [-i KEY.pem] [--port N]
   cc-session remote list | rm NAME
   cc-session list LOCATION [-p PROJ]
+  cc-session delete ID LOCATION [-p PROJ] [-y]
   cc-session ID FROM TO [-p PROJ] [-P DEST_PROJ] [-n]
 
 LOCATION is a Claude config dir: /home/me/.claude, or REMOTE:/root/.claude where REMOTE is a
@@ -48,6 +49,17 @@ if mode == "projects":
         d = os.path.join(root, p)
         if os.path.isdir(d):
             print("%s\t%d" % (p, sum(f.endswith(".jsonl") for f in os.listdir(d))))
+    sys.exit()
+if mode == "delete":
+    import re, shutil
+    proj, sid = sys.argv[3], sys.argv[4]
+    if not re.fullmatch(r"[0-9a-f-]{36}", sid) or "/" in proj or proj.startswith("."):
+        sys.exit("bad session or project name")
+    d = os.path.join(root, proj)
+    if not os.path.isfile(os.path.join(d, sid + ".jsonl")):
+        sys.exit("no such session: " + sid)
+    os.remove(os.path.join(d, sid + ".jsonl"))
+    shutil.rmtree(os.path.join(d, sid), ignore_errors=True)
     sys.exit()
 d = os.path.join(root, sys.argv[3])
 rows = []
@@ -141,6 +153,10 @@ def query(loc, mode, *args):
     m = re.match(r"^([^/:]+):(.*)$", loc)
     machine, path = (m.group(1), m.group(2) or ".claude") if m else (None, loc)
     return run_on(machine, mode, path, *args)
+
+
+def delete_one(sid, loc, proj):
+    query(loc, "delete", proj, sid)
 
 
 def loc_of(machine, path):
@@ -405,6 +421,17 @@ def tui(scr):
                     continue
                 st["ids"], step = v, 3
             elif step == 3:
+                act = menu(scr, "%d session(s) selected" % len(st["ids"]),
+                           [("Copy to another user / machine…", "copy"), ("Delete from %s" % st["src"], "del"), ("Back", "back")])
+                if act in (None, "back"):
+                    step = 2
+                    continue
+                if act == "del":
+                    if menu(scr, "PERMANENTLY delete %d session(s) from\n  %s/projects/%s ?" % (len(st["ids"]), st["src"], st["proj"]),
+                            [("No, keep them", "no"), ("Yes, delete", "yes")]) == "yes":
+                        st["delete"] = True
+                        return st
+                    continue
                 v = pick_location(scr, "Copy TO")
                 if not v:
                     step = 2
@@ -437,6 +464,11 @@ def interactive():
     st = curses.wrapper(tui)
     if not st:
         print("cancelled")
+        return 0
+    if st.get("delete"):
+        for sid in st["ids"]:
+            delete_one(sid, st["src"], st["proj"])
+            print("deleted %s from %s" % (sid, st["src"]))
         return 0
     for sid in st["ids"]:
         copy_one(sid, st["src"], st["dst"], st["proj"], st["dproj"], st["dry"])
@@ -483,8 +515,11 @@ def api_cmd(a):
         out = [{"name": n, "sessions": int(c)} for n, c in query(rest[0], "projects")]
     elif cmd == "sessions" and len(rest) == 1 and a.proj:
         out = [{"id": r[0], "modified": r[1], "mb": r[2], "title": r[3]} for r in query(rest[0], "sessions", a.proj)]
+    elif cmd == "delete" and len(rest) == 2 and a.proj:
+        delete_one(rest[1], rest[0], a.proj)
+        out = True
     else:
-        raise Fail("usage: cc-session api machines | keys | dirs M | scan M | projects LOC | sessions LOC --project=P")
+        raise Fail("usage: cc-session api machines | keys | dirs M | scan M | projects LOC | sessions LOC --project=P | delete LOC ID --project=P")
     print(json.dumps(out))
 
 
@@ -495,6 +530,7 @@ def main():
     ap.add_argument("-P", "--dest-project", dest="dproj", help="project dir name on the destination, if different")
     ap.add_argument("-i", "--identity", metavar="KEY", help="ssh private key (.pem) for remote locations")
     ap.add_argument("--port", type=int, help="ssh port (with 'remote add')")
+    ap.add_argument("-y", "--yes", action="store_true", help="confirm 'delete' without asking")
     ap.add_argument("-n", dest="dry", action="store_true", help="dry run")
     a = ap.parse_args()
     if a.identity:
@@ -513,6 +549,11 @@ def main():
         elif a.args[0] == "list" and len(a.args) == 2:
             for r in query(a.args[1], "sessions", proj):
                 print("%s  %s  %6s MB  %s" % (r[0], r[1], r[2], r[3][:70]))
+        elif a.args[0] == "delete" and len(a.args) == 3:
+            if not a.yes and (not sys.stdin.isatty() or input("Permanently delete %s from %s? [y/N] " % (a.args[1], a.args[2])).lower() != "y"):
+                raise Fail("not deleted (pass -y to confirm)")
+            delete_one(a.args[1], a.args[2], proj)
+            print("deleted %s from %s" % (a.args[1], a.args[2]))
         elif len(a.args) == 3:
             copy_one(a.args[0], a.args[1], a.args[2], proj, a.dproj or proj, a.dry)
             print("copied %s: %s -> %s" % (a.args[0], a.args[1], a.args[2]))

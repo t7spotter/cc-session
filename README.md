@@ -8,10 +8,24 @@ interface. Uses `rsync` over `ssh`; no other dependencies.
 Needs `python3` (3.8+), `rsync` (3.2.3+) and `ssh` on this machine; remote hosts need `python3` too.
 
 ```bash
-git clone <this repo> && cd cc-session && ./install.sh     # -> ~/.local/bin/cc-session
+curl -fsSL https://raw.githubusercontent.com/t7spotter/cc-session/main/install.sh | sh   # -> ~/.local/bin/cc-session
+# or: git clone https://github.com/t7spotter/cc-session && cd cc-session && ./install.sh
 ```
 
+VS Code extension: download `cc-session-*.vsix` from the
+[latest release](https://github.com/t7spotter/cc-session/releases/latest), then
+`code --install-extension cc-session-*.vsix`.
+
 Or a single file: copy `cc-session` anywhere on your `PATH` and `chmod +x` it.
+
+## Privacy and safety
+
+Session files contain your **full conversations, file contents, command output and possibly secrets**
+that appeared in them. This tool sends nothing anywhere except the machines *you* pick, over your own
+ssh. It has no telemetry. Before you share a session file, a screenshot or a bug report, look through
+it. Never commit `~/.claude` or copied sessions to a public repo. Saved remotes
+(`~/.config/cc-session/hosts.json`, mode 600) hold host names and key *paths*, never key contents.
+`delete` removes a session permanently (no trash), so it asks first unless you pass `-y`.
 
 ## Use
 
@@ -19,6 +33,7 @@ Or a single file: copy `cc-session` anywhere on your `PATH` and `chmod +x` it.
 cc-session                                   # interactive: pick from, to, project, sessions
 cc-session -i ~/.ssh/key.pem                 # same, with an ssh key for remote hosts
 cc-session list host:/root/.claude           # sessions on another machine
+cc-session delete ID /root/.claude --project=-home-me-app   # permanent; asks first (-y skips)
 cc-session ID /root/.claude host:/root/.claude --project=-home-me-app
 ```
 

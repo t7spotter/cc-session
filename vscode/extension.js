@@ -148,6 +148,31 @@ async function copy(ctx, node) {
   }
 }
 
+async function del(ctx, node) {
+  const src = node ? node.where : await pickLocation(ctx, "Delete FROM");
+  if (!src) return;
+  const proj = node ? node.project : await pickProject(ctx, `Project on ${src}`, src, currentProject());
+  if (!proj) return;
+  let chosen;
+  if (node && node.sessionId) {
+    chosen = [{ id: node.sessionId, label: node.label }];
+  } else {
+    const rows = await busy("Loading sessions …", () => api(ctx, "sessions", src, `--project=${proj}`));
+    if (!rows.length) return vscode.window.showWarningMessage(`No sessions in ${src}/projects/${proj}`);
+    chosen = await vscode.window.showQuickPick(
+      rows.map((r) => ({ label: r.title || r.id.slice(0, 8), description: `${r.modified}  ${r.mb} MB`, detail: r.id, id: r.id })),
+      { title: "Sessions to DELETE", canPickMany: true, matchOnDetail: true, ignoreFocusOut: true });
+  }
+  if (!chosen || !chosen.length) return;
+  const ok = await vscode.window.showWarningMessage(
+    `Permanently delete ${chosen.length} session(s) from ${src}? This cannot be undone.`, { modal: true }, "Delete");
+  if (ok !== "Delete") return;
+  await busy("Deleting …", async () => {
+    for (const c of chosen) await run(ctx, ["delete", c.id, src, `--project=${proj}`, "-y"]);
+  });
+  vscode.window.showInformationMessage(`${chosen.length} session(s) deleted from ${src}.`);
+  vscode.commands.executeCommand("ccSession.refresh");
+}
 
 // Sidebar: machine > Claude config dir > project > session. Every node carries the location it came from.
 class SessionTree {
@@ -212,6 +237,7 @@ exports.activate = (ctx) => {
     vscode.window.createTreeView("ccSessionTree", { treeDataProvider: tree }),
     vscode.commands.registerCommand("ccSession.refresh", () => tree.refresh()),
     vscode.commands.registerCommand("ccSession.copy", guard(ctx, copy)),
+    vscode.commands.registerCommand("ccSession.delete", guard(ctx, del)),
     vscode.commands.registerCommand("ccSession.addRemote", guard(ctx, async (c) => {
       const name = await addRemote(c);
       if (name) {
