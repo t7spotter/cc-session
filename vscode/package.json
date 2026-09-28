@@ -1,8 +1,8 @@
 {
   "name": "cc-session",
   "displayName": "Claude Sessions Transfer",
-  "description": "Copy Claude Code sessions between users and machines (rsync over ssh).",
-  "version": "0.3.0",
+  "description": "Browse, open, copy and delete Claude Code sessions across machines, from the sidebar.",
+  "version": "0.3.1",
   "publisher": "t7spotter",
   "private": true,
   "engines": {
@@ -125,7 +125,7 @@
     }
   },
   "scripts": {
-    "prepackage": "cp ../cc-session bin/cc-session",
+    "prepackage": "cp cc-session bin/cc-session",
     "package": "npm run prepackage && npx @vscode/vsce package --allow-missing-repository"
   }
 }

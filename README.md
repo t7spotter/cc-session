@@ -1,52 +1,53 @@
-# cc-session
+# Claude Sessions
 
-Copy [Claude Code](https://claude.com/claude-code) sessions between users or machines, with an arrow-key
-interface. Uses `rsync` over `ssh`; no other dependencies.
+A VS Code extension that browses, opens, copies and deletes
+[Claude Code](https://claude.com/claude-code) sessions across users and machines, from a sidebar.
+
+- **Browse:** an activity-bar panel lists every machine (this one, saved remotes, `~/.ssh/config`
+  hosts), and each machine's Claude projects and sessions.
+- **Open:** click a session to read its conversation, as a Markdown tab. Works for sessions on
+  remote machines too.
+- **Copy:** move a session between users or machines, including between two remote machines
+  (staged through this one). Uses `rsync` over `ssh`.
+- **Delete:** permanently remove a session, with a confirmation.
+- **Remotes:** add an `ssh` login (with an optional `.pem` key) from the sidebar; it's saved for
+  next time.
+- **Updates:** a button checks GitHub for a newer release and can install it for you.
 
 ## Install
 
-Needs `python3` (3.8+), `rsync` (any version, including the 2.6.9 that macOS ships) and `ssh` on this machine; remote hosts need `python3` too.
+Download the `.vsix` from the [latest release](https://github.com/t7spotter/cc-session/releases/latest)
+and run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/t7spotter/cc-session/main/install.sh | sh   # -> ~/.local/bin/cc-session
-# or: git clone https://github.com/t7spotter/cc-session && cd cc-session && ./install.sh
+code --install-extension cc-session-*.vsix
 ```
 
-VS Code extension: download `cc-session-*.vsix` from the
-[latest release](https://github.com/t7spotter/cc-session/releases/latest), then
-`code --install-extension cc-session-*.vsix`.
-
-Or a single file: copy `cc-session` anywhere on your `PATH` and `chmod +x` it.
+Then open the "Claude Sessions" icon in the activity bar. Needs `python3` (3.8+), `rsync` (any
+version, including the 2.6.9 that macOS ships) and `ssh` on this machine; remote hosts need
+`python3` too. After install, the "Check for Updates" button in the sidebar can update the
+extension itself.
 
 ## Privacy and safety
 
-Session files contain your **full conversations, file contents, command output and possibly secrets**
-that appeared in them. This tool sends nothing anywhere except the machines *you* pick, over your own
-ssh. It has no telemetry. Before you share a session file, a screenshot or a bug report, look through
-it. Never commit `~/.claude` or copied sessions to a public repo. Saved remotes
+Session files contain your **full conversations, file contents, command output and possibly
+secrets** that appeared in them. This extension sends nothing anywhere except the machines *you*
+pick, over your own ssh, plus one read-only request to GitHub's release API when you press "Check
+for Updates". It has no telemetry. Before you share a session file, a screenshot or a bug report,
+look through it. Never commit `~/.claude` or copied sessions to a public repo. Saved remotes
 (`~/.config/cc-session/hosts.json`, mode 600) hold host names and key *paths*, never key contents.
-`delete` removes a session permanently (no trash), so it asks first unless you pass `-y`.
+Delete is permanent (no trash), and it asks for confirmation first.
 
-## Use
+## Development
+
+`vscode/cc-session` is the engine (listing, ssh, rsync); `vscode/extension.js` is the UI, and
+shells out to it. Build and install a local copy:
 
 ```bash
-cc-session                                   # interactive: pick from, to, project, sessions
-cc-session -i ~/.ssh/key.pem                 # same, with an ssh key for remote hosts
-cc-session list host:/root/.claude           # sessions on another machine
-cc-session delete ID /root/.claude --project=-home-me-app   # permanent; asks first (-y skips)
-cc-session ID /root/.claude host:/root/.claude --project=-home-me-app
+cd vscode
+npm run package             # bundles vscode/cc-session into bin/, writes cc-session-*.vsix
+code --install-extension cc-session-*.vsix
 ```
 
-Locations are Claude config dirs: `/home/me/.claude` or `[user@]host:/path/.claude`.
-`--project` is the directory name under `projects/` (your working directory with every non-alphanumeric
-character replaced by `-`); use `--dest-project` if the path differs on the destination.
-Hosts in `~/.ssh/config` show up in the picker. `CC_SESSION_SSH_OPTS="-p 2222"` adds ssh options.
-
-Notes: remote listing uses `ssh -o BatchMode=yes`, so accept the host key once by hand first. Running as
-root into another local user's `~/.claude` sets file ownership to that user. Existing sessions with the same
-id are overwritten.
-
-## VS Code extension
-
-`vscode/` wraps this tool in command-palette pickers (`Claude Sessions: Copy Sessions…`, `Add Remote…`).
-Build with `cd vscode && npm run package`, install with `code --install-extension cc-session-0.1.0.vsix`.
+Settings: `ccSession.path` (use another cc-session binary instead of the bundled one),
+`ccSession.pythonPath`.
